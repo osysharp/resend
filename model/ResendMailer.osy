@@ -1,0 +1,220 @@
+namespace Osysharp.Resend;
+
+using Osysharp.Http;
+
+/// One email, as an app writes it. Everything optional is genuinely optional — a plain-text notice sets three
+/// fields and nothing else.
+///
+/// ⚑ `To` IS A LIST BECAUSE THE PROVIDER'S IS. A single-recipient convenience that quietly wrapped a string would
+/// make the two-recipient case look like a different feature, which is how an API grows a second way to do one thing.
+public class EmailMessage {
+  /// The sender, on a domain verified with the provider. Left empty, the mailer's own `From` is used.
+  public string From = "";
+  public List<string> To = [];
+  public string Subject = "";
+  /// The plain-text body. One of `Text` and `Html` must be set.
+  public string? Text;
+  /// The HTML body. One of `Text` and `Html` must be set.
+  public string? Html;
+  public List<string> Cc = [];
+  public List<string> Bcc = [];
+  /// Where a human reply goes, when that is not the sender.
+  public List<string> ReplyTo = [];
+  /// Files to attach: `new EmailAttachment { Filename = "invoice.pdf", Content = bytes }`.
+  public List<EmailAttachment> Attachments = [];
+  /// Headers of the MAIL (not of the API call) — the one a list mail needs is the unsubscribe pair, which a mail client
+  /// turns into an "Unsubscribe" button beside the sender (RFC 2369, and RFC 8058 for the one-click POST):
+  ///
+  ///     Headers = new Dictionary<string, string> {
+  ///       { "List-Unsubscribe", "<https://shop.example/lists/leave/…>" },
+  ///       { "List-Unsubscribe-Post", "List-Unsubscribe=One-Click" },
+  ///     }
+  ///
+  /// Gmail and Yahoo require both on bulk mail. `ListUnsubscribeHeaders(url)` builds the pair.
+  public Dictionary<string, string> Headers = new Dictionary<string, string>();
+}
+
+/// The two headers that give a list mail a one-click "Unsubscribe" beside its sender (RFC 2369 + RFC 8058): the
+/// address a mail client POSTs `List-Unsubscribe=One-Click` to, and the line that says it may.
+public Dictionary<string, string> ListUnsubscribeHeaders(string url) {
+  var headers = new Dictionary<string, string>();
+  headers.Add("List-Unsubscribe", "<" + url + ">");
+  headers.Add("List-Unsubscribe-Post", "List-Unsubscribe=One-Click");
+  return headers;
+}
+
+/// One attachment. The bytes are sent base64-encoded, which is what the provider takes — the app hands over bytes
+/// and never encodes anything itself.
+public class EmailAttachment {
+  public string Filename = "";
+  public byte[] Content = [];
+  /// The media type. Resend infers one from the filename when this is empty, which is right far more often than a
+  /// guess made here would be.
+  public string ContentType = "";
+  /// Makes it an INLINE picture: the HTML shows it as `<img src="cid:ContentId">`, so it is part of the mail rather
+  /// than a file beside it — and shows where a client blocks remote pictures. Under 128 characters. Empty: an
+  /// ordinary attachment. A rendered mail's `Inline` pictures are exactly these (`RenderedEmail.Inline`).
+  public string ContentId = "";
+}
+
+/// Transactional email through Resend. One factory in the app, then send through it:
+///
+///   ResendMailer Mail() { return new ResendMailer { ApiKey = Secret.ResendApiKey, From = "Acme <noreply@acme.com>" }; }
+///
+///   void EmailReceipt(Order order) {
+///     Mail().Send(new EmailMessage {
+///       To = [order.Customer.Email],
+///       Subject = $"Your receipt for order {order.Reference}",
+///       Text = $"Thank you. We charged {order.Total:C} to the card ending {order.CardLast4}.",
+///     });
+///   }
+///
+/// ⭐ ONE FACTORY, AND IT COMPILES (BL-14, 2026-09-27). The compiler notes that the credential field was assigned a
+/// secret, so the object may be returned and passed between your functions while the FIELD cannot be read back out —
+/// returned, logged, stored, copied or sent to a page. A component holding the client is refused (an object reaches the
+/// browser with its fields), and so is invoking the factory from a request.
+///
+/// ⛔ IT RUNS SERVER-SIDE BY CONSTRUCTION, like every outbound call: the server holds the credential and the browser
+/// must not. There is no `async` and no `await` — you call it.
+///
+/// ⚠ A SEND THAT FAILS THROWS, and that is the right default for mail. A receipt that silently did not go out is
+/// the worst of the three outcomes (sent / visibly failed / silently dropped), and a caller that genuinely wants to
+/// continue anyway can catch `ExternalServiceException` and say so.
+public class ResendMailer {
+  /// The API key. Declared where the mailer is built, so the app names its own secret:
+  /// `new ResendMailer { ApiKey = Secret.ResendApiKey }`.
+  public string ApiKey = "";
+  /// The default sender, used for any message that does not set its own. A domain verified with Resend, or every
+  /// send is refused — which is the first thing to check when a correct-looking call answers 403.
+  public string From = "";
+  /// The API root. Resend's own unless you are pointed at a gateway that speaks the same wire.
+  public string BaseUrl = "https://api.resend.com";
+
+  /// Send one email. Answers the provider's id for the queued message — worth storing beside whatever the mail is
+  /// about, because it is the only handle that ties a support question to a delivery.
+  ///
+  /// `idempotencyKey` makes a retry safe: Resend sends once per key for 24 hours, so a handler that runs twice
+  /// (a redelivered event, a retried workflow step) does not mail the customer twice. Pass something derived from
+  /// what the mail is ABOUT — an order id, not a timestamp.
+  public string Send(EmailMessage message, string? idempotencyKey = null) {
+    var r = Http.Post(BaseUrl + "/emails", JsonSerializer.Serialize(Wire(message), JsonOptions()),
+                      "application/json", Headers(idempotencyKey));
+    if (!r.IsSuccess) { throw new ExternalServiceException(Failure("send", r)); }
+
+    var answer = JsonSerializer.Deserialize<ResendSendResponse>(r.Body);
+    return answer.MessageId ?? "";
+  }
+
+  /// Send up to 100 emails in ONE call, answering their ids in the order given.
+  ///
+  /// ⭐ IT IS NOT A LOOP OVER `Send`. A hundred separate calls is a hundred round trips and a hundred chances to be
+  /// rate-limited half way through, leaving a job that has mailed some of its recipients and cannot tell you which.
+  /// One call either takes the batch or does not.
+  ///
+  /// ⚠ RESEND'S BATCH ENDPOINT TAKES NO ATTACHMENTS. A message carrying one is refused HERE, naming it, rather than
+  /// being sent without its file — a receipt whose invoice is missing is worse than a receipt that failed.
+  public List<string> SendBatch(List<EmailMessage> messages) {
+    if (messages.Count == 0) { return []; }
+    if (messages.Count > 100) {
+      throw new ExternalServiceException($"Resend takes at most 100 messages in one batch; this one has {messages.Count}. Send them in chunks.");
+    }
+    foreach (var message in messages) {
+      if (message.Attachments.Count > 0) {
+        throw new ExternalServiceException($"Resend's batch endpoint does not take attachments, and '{message.Subject}' has {message.Attachments.Count}. Send that one with `Send`.");
+      }
+    }
+
+    List<ResendSendRequest> bodies = [];
+    foreach (var message in messages) { bodies.Add(Wire(message)); }
+
+    var r = Http.Post(BaseUrl + "/emails/batch", JsonSerializer.Serialize(bodies, JsonOptions()),
+                      "application/json", Headers(null));
+    if (!r.IsSuccess) { throw new ExternalServiceException(Failure("batch send", r)); }
+
+    var answer = JsonSerializer.Deserialize<ResendBatchResponse>(r.Body);
+    List<string> ids = [];
+    foreach (var sent in answer.Data) { ids.Add(sent.MessageId ?? ""); }
+    return ids;
+  }
+
+  // ── the wire ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+  /// One message as Resend's request. The refusals here are the ones whose provider-side error names a field the
+  /// author never wrote, so they are worth catching where the author's own words still are.
+  ResendSendRequest Wire(EmailMessage message) {
+    var sender = message.From != "" ? message.From : From;
+    if (sender == "") {
+      throw new ExternalServiceException("This email has no sender: set `From` on the message, or on the Resend mailer it is sent through. It must be an address on a domain you have verified with Resend.");
+    }
+    if (message.To.Count == 0) {
+      throw new ExternalServiceException($"This email has no recipient: set `To` on '{message.Subject}'.");
+    }
+    if (message.Text == null && message.Html == null) {
+      throw new ExternalServiceException($"This email has no body: set `Text`, `Html` or both on '{message.Subject}'. Resend refuses a message with neither, and its own message names a JSON field rather than the property you wrote.");
+    }
+
+    var request = new ResendSendRequest {
+      From = sender,
+      To = message.To,
+      Subject = message.Subject,
+      Text = message.Text,
+      Html = message.Html,
+      // Empty lists become ABSENT, not `[]`. `"cc": []` is accepted, but an empty key on every message is noise in
+      // a request somebody will one day read in a log to work out what was actually sent.
+      Cc = message.Cc.Count > 0 ? message.Cc : null,
+      Bcc = message.Bcc.Count > 0 ? message.Bcc : null,
+      ReplyTo = message.ReplyTo.Count > 0 ? message.ReplyTo : null,
+      Headers = message.Headers.Count > 0 ? message.Headers : null,
+    };
+
+    if (message.Attachments.Count > 0) {
+      List<Json> attachments = [];
+      foreach (var file in message.Attachments) {
+        if (file.ContentId.Length >= 128) {
+          throw new ExternalServiceException($"Resend takes a content id under 128 characters, and '{file.Filename}' has one of {file.ContentId.Length}.");
+        }
+        // An inline picture carries its content id — the name its `cid:` in the HTML resolves to.
+        if (file.ContentId != "") {
+          if (file.ContentType != "") {
+            attachments.Add(new { filename = file.Filename, content = Convert.ToBase64String(file.Content), content_type = file.ContentType, content_id = file.ContentId });
+          } else {
+            attachments.Add(new { filename = file.Filename, content = Convert.ToBase64String(file.Content), content_id = file.ContentId });
+          }
+          continue;
+        }
+        if (file.ContentType != "") {
+          attachments.Add(new { filename = file.Filename, content = Convert.ToBase64String(file.Content), content_type = file.ContentType });
+        } else {
+          attachments.Add(new { filename = file.Filename, content = Convert.ToBase64String(file.Content) });
+        }
+      }
+      request.Attachments = attachments;
+    }
+
+    return request;
+  }
+
+  JsonSerializerOptions JsonOptions() {
+    return new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
+  }
+
+  Dictionary<string, string> Headers(string? idempotencyKey) {
+    var headers = new Dictionary<string, string>();
+    headers.Add("Authorization", "Bearer " + ApiKey);
+    if (idempotencyKey != null) { headers.Add("Idempotency-Key", idempotencyKey); }
+    return headers;
+  }
+
+  /// What went wrong, in Resend's own words where it gave any. A status code alone sends the reader to a status-code
+  /// table; "validation_error: The `from` address is not a verified domain" sends them to their DNS.
+  string Failure(string what, HttpResponse r) {
+    var detail = r.Body;
+    if (r.Body != "") {
+      var error = JsonSerializer.Deserialize<ResendError>(r.Body);
+      if (error.Message != null) {
+        detail = error.Name != null ? error.Name + ": " + error.Message : error.Message;
+      }
+    }
+    return "Resend " + what + " answered " + Convert.ToString(r.StatusCode) + ": " + detail;
+  }
+}

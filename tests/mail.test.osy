@@ -1,0 +1,262 @@
+namespace ResendKitTests;
+
+using Osysharp.Http;
+using Osysharp.Resend;
+
+// The kit's own tests. `osy publish` runs them and refuses to publish a version that fails — see the `tests` setting
+// in ../package.osy.
+//
+// ⭐ EVERY ONE OF THEM ASSERTS WHAT WENT ON THE WIRE, not that a call returned. A mail kit's whole job is the shape
+//    of one JSON body; a test that only checked for an id would pass against a body missing its recipient.
+
+[Test]
+void a_plain_receipt_posts_the_message_and_answers_its_id() {
+  var posted = new List<string>();
+  var urls = new List<string>();
+  Http.Post.Stub((url, body) => {
+    urls.Add(url);
+    posted.Add(body);
+    return new HttpResponse { StatusCode = 200, Body = "{\"id\":\"11111111-2222-3333-4444-555555555555\"}" };
+  });
+
+  var id = SendReceipt("buyer@example.test", "A-1001");
+
+  Assert.Equal("11111111-2222-3333-4444-555555555555", id);
+  Assert.Equal("https://api.resend.com/emails", urls[0]);
+  Assert.Contains("\"to\":[\"buyer@example.test\"]", posted[0]);
+  Assert.Contains("\"subject\":\"Your receipt for A-1001\"", posted[0]);
+  // The mailer's own `From` fills in for a message that names none.
+  Assert.Contains("noreply@acme.test", posted[0]);
+}
+
+[Test]
+void an_absent_field_is_ABSENT_rather_than_null() {
+  // ⛔ THE POINT OF THE IGNORE CONDITION. `"html": null` and no `html` key are different requests to a provider,
+  //    and the second is the one that means "I am not sending HTML".
+  var posted = new List<string>();
+  var urls = new List<string>();
+  Http.Post.Stub((url, body) => {
+    urls.Add(url);
+    posted.Add(body);
+    return new HttpResponse { StatusCode = 200, Body = "{\"id\":\"id-1\"}" };
+  });
+
+  SendReceipt("buyer@example.test", "A-1002");
+
+  Assert.Contains("\"text\":", posted[0]);
+  Assert.DoesNotContain("\"html\"", posted[0]);
+  Assert.DoesNotContain("null", posted[0]);
+}
+
+[Test]
+void cc_and_reply_to_travel_as_the_arrays_the_provider_takes() {
+  var posted = new List<string>();
+  var urls = new List<string>();
+  Http.Post.Stub((url, body) => {
+    urls.Add(url);
+    posted.Add(body);
+    return new HttpResponse { StatusCode = 200, Body = "{\"id\":\"id-2\"}" };
+  });
+
+  SendHtmlNotice("owner@example.test");
+
+  // ⚠ `<` AND `>` TRAVEL ESCAPED — `"html":"\u003Cp\u003E…"`. That is the JSON serializer's default encoder, it
+  //    is valid JSON, and Resend decodes it to exactly the markup written above; asserting the literal `<p>` here
+  //    would be asserting an encoder setting rather than the message. What the mail actually carries is the TEXT.
+  Assert.Contains("Your statement is ready.", posted[0]);
+  Assert.Contains("\"html\":", posted[0]);
+  Assert.Contains("\"cc\":[\"records@acme.test\"]", posted[0]);
+  Assert.Contains("\"reply_to\":[\"support@acme.test\"]", posted[0]);
+  // …and the ones that were not set are not there at all.
+  Assert.DoesNotContain("\"bcc\"", posted[0]);
+  Assert.DoesNotContain("\"attachments\"", posted[0]);
+}
+
+[Test]
+void an_attachment_is_base64_and_the_app_never_encodes_anything() {
+  var posted = new List<string>();
+  var urls = new List<string>();
+  Http.Post.Stub((url, body) => {
+    urls.Add(url);
+    posted.Add(body);
+    return new HttpResponse { StatusCode = 200, Body = "{\"id\":\"id-3\"}" };
+  });
+
+  SendWithInvoice("buyer@example.test", Convert.FromBase64String("JVBERg=="));   // "%PDF"
+
+  Assert.Contains("\"filename\":\"invoice.pdf\"", posted[0]);
+  Assert.Contains("\"content\":\"JVBERg==\"", posted[0]);
+  Assert.Contains("\"content_type\":\"application/pdf\"", posted[0]);
+}
+
+/// An INLINE picture is an attachment with a content id — what the HTML's `cid:` resolves to. Without `content_id` on
+/// the wire the picture arrives as a loose file beside the mail and the `<img>` shows nothing.
+[Test]
+void an_inline_picture_carries_its_content_id() {
+  var posted = new List<string>();
+  Http.Post.Stub((url, body) => {
+    posted.Add(body);
+    return new HttpResponse { StatusCode = 200, Body = "{\"id\":\"id-4\"}" };
+  });
+
+  SendWithInlineLogo("buyer@example.test", Convert.FromBase64String("iVBORw=="));
+
+  Assert.Contains("\"filename\":\"logo.png\"", posted[0]);
+  Assert.Contains("\"content_id\":\"logo-1\"", posted[0]);
+  Assert.Contains("\"content_type\":\"image/png\"", posted[0]);
+  Assert.Contains("cid:logo-1", posted[0]);
+}
+
+[Test]
+void a_batch_is_ONE_call_and_answers_the_ids_in_order() {
+  // ⚑ THE ASSERTION THAT MATTERS IS THE COUNT OF CALLS. A loop over `Send` would answer the same ids and be a
+  //   hundred round trips, half of which can be rate-limited — leaving a job that has mailed some of its
+  //   recipients and cannot say which.
+  var urls = new List<string>();
+  Http.Post.Stub((url, body) => {
+    urls.Add(url);
+    return new HttpResponse { StatusCode = 200, Body = "{\"data\":[{\"id\":\"b-1\"},{\"id\":\"b-2\"},{\"id\":\"b-3\"}]}" };
+  });
+
+  var ids = SendBatch(["a@example.test", "b@example.test", "c@example.test"]);
+
+  Assert.Equal(1, urls.Count);
+  Assert.Equal("https://api.resend.com/emails/batch", urls[0]);
+  Assert.Equal(3, ids.Count);
+  Assert.Equal("b-1", ids[0]);
+  Assert.Equal("b-3", ids[2]);
+}
+
+[Test]
+void an_empty_batch_sends_nothing_at_all() {
+  var urls = new List<string>();
+  Http.Post.Stub((url, body) => { urls.Add(url); return new HttpResponse { StatusCode = 200, Body = "{\"data\":[]}" }; });
+
+  var ids = SendBatch([]);
+
+  Assert.Equal(0, urls.Count);
+  Assert.Equal(0, ids.Count);
+}
+
+[Test]
+void a_message_with_no_body_is_refused_BEFORE_the_call() {
+  // ⛔ NAMED IN THE AUTHOR'S OWN WORDS. Resend answers 422 with a message about a JSON field the author never
+  //    wrote; this refusal names the property they did write, and the subject of the mail they meant to send.
+  var urls = new List<string>();
+  Http.Post.Stub((url, body) => { urls.Add(url); return new HttpResponse { StatusCode = 200, Body = "{\"id\":\"x\"}" }; });
+
+  var refusal = Assert.Throws<ExternalServiceException>(() => SendBodyless("buyer@example.test"));
+
+  Assert.Equal(0, urls.Count);
+  Assert.Contains("Text", refusal.Message);
+  Assert.Contains("Nothing to say", refusal.Message);
+}
+
+[Test]
+void a_message_with_no_sender_says_where_to_set_one() {
+  var urls = new List<string>();
+  Http.Post.Stub((url, body) => { urls.Add(url); return new HttpResponse { StatusCode = 200, Body = "{\"id\":\"x\"}" }; });
+
+  var refusal = Assert.Throws<ExternalServiceException>(() => SendSenderless("buyer@example.test"));
+
+  Assert.Equal(0, urls.Count);
+  Assert.Contains("verified", refusal.Message);
+}
+
+[Test]
+void a_refusal_from_the_provider_is_quoted_in_ITS_own_words() {
+  // "422" sends the reader to a status-code table. "validation_error: The `from` address is not verified" sends
+  // them to their DNS, which is where the problem is.
+  Http.Post.Stub((url, body) => new HttpResponse {
+    StatusCode = 422,
+    Body = "{\"name\":\"validation_error\",\"message\":\"The from address is not a verified domain.\"}",
+  });
+
+  var refusal = Assert.Throws<ExternalServiceException>(() => SendReceipt("buyer@example.test", "A-1003"));
+
+  Assert.Contains("validation_error", refusal.Message);
+  Assert.Contains("not a verified domain", refusal.Message);
+  Assert.Contains("422", refusal.Message);
+}
+
+[Test]
+void an_idempotency_key_rides_a_single_send() {
+  // A handler that runs twice — a redelivered event, a retried workflow step — must not mail the customer twice.
+  // The key is derived from what the mail is ABOUT, so the retry carries the same one.
+  //
+  // ⚠ THIS TEST USED TO ASSERT NOTHING IT WAS NAMED FOR, and said so in its own comment: *"The header is not
+  //   visible in the body; what this holds is that passing a key does not disturb the request."* A stub lambda could
+  //   see the URL and the body and no headers, so the key — which travels as a header — was unobservable, and what
+  //   was left was a subject-line assertion wearing an idempotency test's name. Worse than no test: it read as
+  //   coverage. The third stub parameter (2026-09-20) is what makes the real assertion writable.
+  var sentKeys = new List<string>();
+  var sentAuth = new List<string>();
+  Http.Post.Stub((url, body, headers) => {
+    sentKeys.Add(headers["Idempotency-Key"]);
+    sentAuth.Add(headers["Authorization"]);
+    return new HttpResponse { StatusCode = 200, Body = "{\"id\":\"id-4\"}" };
+  });
+
+  SendReceipt("buyer@example.test", "A-1004");
+  SendReceipt("buyer@example.test", "A-1004");
+
+  // ⭐ THE KEY REACHED THE WIRE, and it is the SAME one both times — which is the whole mechanism: a provider
+  //    deduplicates on this header, so a key that changed per attempt would send the customer two receipts while
+  //    every test stayed green.
+  Assert.Equal(2, sentKeys.Count);
+  Assert.Equal(sentKeys[0], sentKeys[1]);
+  Assert.NotEqual("", sentKeys[0]);
+
+  // …and the CREDENTIAL reached it too. A wrapper that computes a perfect key and forgets to attach it passes every
+  // body-shape assertion in this file; this is the one that does not.
+  Assert.Equal("Bearer re_test_key", sentAuth[0]);
+}
+
+[Test]
+void a_webhook_signed_by_resend_is_believed_and_anything_else_is_refused() {
+  // Svix's own published test vector — the signature is theirs, not computed here, so the check is against the
+  // scheme Resend actually uses rather than against itself.
+  var hook = new ResendWebhook { SigningSecret = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw", ToleranceSeconds = 0 };
+  var body = "{\"test\": 2432232314}";
+  var e = hook.Verify(body, "msg_p5jXN8AQM9LWM0D4loKWxJek", "1614265330", "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE=");
+  Assert.Equal(body, e.Payload);
+  // A body changed by one character, another id, or no signature at all: refused.
+  Assert.Throws<ValidationException>(() => hook.Verify("{\"test\": 2432232315}", "msg_p5jXN8AQM9LWM0D4loKWxJek", "1614265330", "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="));
+  Assert.Throws<ValidationException>(() => hook.Verify(body, "msg_other", "1614265330", "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="));
+  Assert.Throws<ValidationException>(() => hook.Verify(body, "msg_p5jXN8AQM9LWM0D4loKWxJek", "1614265330", ""));
+  // …and with the replay window on, a year-old signature is refused however right it is.
+  Assert.Throws<ValidationException>(() => new ResendWebhook { SigningSecret = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw" }
+    .Verify(body, "msg_p5jXN8AQM9LWM0D4loKWxJek", "1614265330", "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="));
+}
+
+[Test]
+void a_bounce_names_its_address_and_whether_it_is_permanent() {
+  var secret = "whsec_" + Convert.ToBase64String(Text.ToBytes("a-test-signing-key-of-some-length"));
+  var body = "{\"type\":\"email.bounced\",\"created_at\":\"2026-09-28T10:00:00Z\",\"data\":{\"email_id\":\"e-1\",\"to\":[\"gone@example.test\"],\"bounce\":{\"type\":\"Permanent\",\"subType\":\"General\",\"message\":\"mailbox does not exist\"}}}";
+  // Signed the way Svix signs (the vector above proves the scheme); here it is the parse under test.
+  var sig = Convert.ToBase64String(Crypto.HmacSha256(Convert.FromBase64String(secret.Substring(6)), Text.ToBytes("m1.1700000000." + body)));
+  var e = new ResendWebhook { SigningSecret = secret, ToleranceSeconds = 0 }.Verify(body, "m1", "1700000000", "v1,nope v1," + sig);
+  Assert.Equal("email.bounced", e.Type);
+  Assert.Equal("gone@example.test", e.To[0]);
+  Assert.True(e.Permanent);
+  Assert.Contains("mailbox does not exist", e.Detail);
+}
+
+[Test]
+void a_list_mail_carries_the_one_click_unsubscribe_headers() {
+  // ⭐ THE HEADERS ARE THE MAIL'S, on the wire as Resend's `headers` object — not the API call's own headers, which
+  //    carry the key. Gmail and Yahoo refuse bulk mail without this pair.
+  var posted = new List<string>();
+  Http.Post.Stub((url, body) => {
+    posted.Add(body);
+    return new HttpResponse { StatusCode = 200, Body = "{\"id\":\"id-list\"}" };
+  });
+
+  SendListMail("reader@example.test", "https://shop.example/lists/leave/abc.123");
+
+  // (The serializer writes `<` and `>` as `\u003C` / `\u003E` — the same string to any JSON reader.)
+  Assert.Contains("\"headers\":{\"List-Unsubscribe\":\"\\u003Chttps://shop.example/lists/leave/abc.123\\u003E\",\"List-Unsubscribe-Post\":\"List-Unsubscribe=One-Click\"}", posted[0]);
+  // …and a mail with none sends no `headers` key at all.
+  SendReceipt("buyer@example.test", "A-1003");
+  Assert.DoesNotContain("\"headers\"", posted[1]);
+}

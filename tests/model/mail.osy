@@ -1,0 +1,77 @@
+namespace ResendKitTests;
+
+using Osysharp.Resend;
+
+// The app under test is deliberately thin: the KIT is what is being tested, so these functions exist only to give
+// the tests something to call that a real app would also have written.
+
+/// The mailer an app holds. In a real app `ApiKey` is `Secret.ResendApiKey`; here it is a literal, because no send
+/// ever leaves the process — every test stubs `Http.Post`.
+ResendMailer Mail() {
+  return new ResendMailer { ApiKey = "re_test_key", From = "Acme <noreply@acme.test>" };
+}
+
+string SendReceipt(string to, string reference) {
+  return Mail().Send(new EmailMessage {
+    To = [to],
+    Subject = $"Your receipt for {reference}",
+    Text = $"Thank you. Your order {reference} is confirmed.",
+  }, reference);
+}
+
+string SendHtmlNotice(string to) {
+  return Mail().Send(new EmailMessage {
+    To = [to],
+    Cc = ["records@acme.test"],
+    ReplyTo = ["support@acme.test"],
+    Subject = "Your statement is ready",
+    Html = "<p>Your statement is ready.</p>",
+  });
+}
+
+string SendWithInvoice(string to, byte[] pdf) {
+  return Mail().Send(new EmailMessage {
+    To = [to],
+    Subject = "Your invoice",
+    Text = "The invoice is attached.",
+    Attachments = [new EmailAttachment { Filename = "invoice.pdf", Content = pdf, ContentType = "application/pdf" }],
+  });
+}
+
+/// A mail whose logo travels INSIDE it — the HTML names the picture by `cid:`, the attachment carries the same id.
+string SendWithInlineLogo(string to, byte[] png) {
+  return Mail().Send(new EmailMessage {
+    To = [to],
+    Subject = "Welcome",
+    Html = "<img src=\"cid:logo-1\" alt=\"Acme\"><p>Welcome.</p>",
+    Text = "Welcome.",
+    Attachments = [new EmailAttachment { Filename = "logo.png", Content = png, ContentType = "image/png", ContentId = "logo-1" }],
+  });
+}
+
+List<string> SendBatch(List<string> recipients) {
+  List<EmailMessage> messages = [];
+  foreach (var to in recipients) {
+    messages.Add(new EmailMessage { To = [to], Subject = "Maintenance tonight", Text = "We are upgrading at 02:00." });
+  }
+  return Mail().SendBatch(messages);
+}
+
+string SendBodyless(string to) {
+  return Mail().Send(new EmailMessage { To = [to], Subject = "Nothing to say" });
+}
+
+string SendSenderless(string to) {
+  return new ResendMailer { ApiKey = "re_test_key" }.Send(new EmailMessage {
+    To = [to], Subject = "From nobody", Text = "…",
+  });
+}
+
+string SendListMail(string to, string unsubscribe) {
+  return Mail().Send(new EmailMessage {
+    To = [to],
+    Subject = "September letter",
+    Text = "New beans.",
+    Headers = ListUnsubscribeHeaders(unsubscribe),
+  });
+}

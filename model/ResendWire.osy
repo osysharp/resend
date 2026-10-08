@@ -1,0 +1,46 @@
+// The Resend API on the wire. Its names are snake_case, so each field says its own external name — the class names
+// stay Osy#'s and the JSON stays Resend's.
+namespace Osysharp.Resend;
+
+/// What goes UP for `POST /emails`. Every nullable member is one Resend must not see when it does not apply: the
+/// request is serialized with `DefaultIgnoreCondition = WhenWritingNull`, so an absent field is absent rather than
+/// `null` — which for `attachments` and `reply_to` is the difference between "I have none" and a rejected request.
+public class ResendSendRequest {
+  [ExternalName("from")] public string From = "";
+  /// Resend takes an array even for one recipient, which is also what makes `Cc`/`Bcc` uniform.
+  [ExternalName("to")] public List<string> To = [];
+  [ExternalName("subject")] public string Subject = "";
+  /// ⚠ ONE OF THESE TWO MUST BE PRESENT — a message with neither has nothing to show. `Resend.Send` refuses before
+  /// the call rather than letting the provider answer 422, because its message names a JSON field the author did
+  /// not write.
+  [ExternalName("text")] public string? Text;
+  [ExternalName("html")] public string? Html;
+  [ExternalName("cc")] public List<string>? Cc;
+  [ExternalName("bcc")] public List<string>? Bcc;
+  [ExternalName("reply_to")] public List<string>? ReplyTo;
+  [ExternalName("attachments")] public List<Json>? Attachments;
+  /// Resend's own tag list — name/value pairs it shows on the message in its console.
+  [ExternalName("tags")] public List<Json>? Tags;
+  /// Headers of the mail itself — `List-Unsubscribe` and friends — as name → value.
+  [ExternalName("headers")] public Dictionary<string, string>? Headers;
+}
+
+/// What comes back from a single send: the provider's id for the queued message.
+///
+/// ⚠ The JSON field is `id`, and a materialized class gets an implicit `Id`, so the member is `MessageId` and
+/// `[ExternalName]` keeps the wire mapping. (The same shape `demo/auth-demo` had to discover by hand.)
+public class ResendSendResponse {
+  [ExternalName("id")] public string? MessageId;
+}
+
+/// What comes back from `POST /emails/batch` — one entry per message, in the order they were sent.
+public class ResendBatchResponse {
+  [ExternalName("data")] public List<ResendSendResponse> Data = [];
+}
+
+/// What Resend says when it refuses. Carried so the failure message can quote the provider's own words rather than
+/// a status code alone: "validation_error: The `from` address is not a verified domain" is actionable; "422" is not.
+public class ResendError {
+  [ExternalName("name")] public string? Name;
+  [ExternalName("message")] public string? Message;
+}

@@ -1,0 +1,19 @@
+// The producer's test project for Osysharp.Resend — an ordinary app that depends on the kit by name.
+//
+// ⭐ IT READS THE WORKING TREE, not the last release: the repository's `osy.workspace` lists `kits/*`, so `use
+//    Osysharp.Resend` resolves from the directory beside this one. Without that every run would test the version
+//    published yesterday, and pass.
+//
+// ⛔ THIS PROJECT IS NOT PART OF THE PACKAGE. `kits/resend/package.osy` names it with the `tests` SETTING, which
+//    contributes nothing to the archive — a consumer never receives it, compiles it or pays for it. What the setting
+//    DOES do is make `osy publish` run these tests and refuse a version that fails them.
+app ResendKitTests {
+  model "model/**/*.osy";
+  tests "**/*.test.osy";
+
+  // The kit asks for one host, and this app grants it — a package gets no authority from being depended on.
+  use Osysharp.Resend@0 { egress "api.resend.com"; }
+  // The tests STUB `Http.Post`, so this app names the capability it stubs. A dependency is not inherited from a
+  // package: the kit's own `use Osysharp.Http;` puts `Http.*` in the KIT's scope, not in its consumer's.
+  use Osysharp.Http;
+}

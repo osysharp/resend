@@ -1,0 +1,27 @@
+// Osysharp.Resend — transactional email through Resend, written in Osy#.
+//
+// It needs nothing privileged. It is ordinary Osy# using only public APIs — a class building its request with
+// `JsonSerializer` and sending it with `Http.*` — so anyone could have written it exactly as it is, for a provider
+// the platform has never heard of.
+//
+// It asks for one host, and an app that uses it grants it or does not compile. It asks for no SECRET: the API key is
+// a setting on the mailer, so the app names its own secret (`new ResendMailer { ApiKey = Secret.Mine }`) and this package
+// never learns which.
+//
+// ⭐ THE PLATFORM HAS NO `Email.Send`, DELIBERATELY. Delivery is somebody's account with somebody's provider, and a
+//    stdlib verb would have to pick one. What the platform owes instead is that expressing it takes a few lines of
+//    ordinary Osy# — which is what this kit is, and why the whole of it is 200 lines with no C# anywhere.
+package Osysharp.Resend {
+  version     "0.2.0";
+  minPlatform "0.9.0";
+  summary     "transactional email through Resend — one send or a batch, text and HTML, replies and attachments.";
+
+  model "model/*.osy";
+  use Osysharp.Http;
+
+  egress "api.resend.com";
+
+  // The producer's own test project. It does NOT ship — `tests` is a SETTING, so the archive (the union of the role
+  // globs) never contains it — and `osy publish` runs it, refusing to publish a version whose own tests fail.
+  tests "tests";
+}

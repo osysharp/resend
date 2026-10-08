@@ -1,0 +1,104 @@
+namespace Osysharp.Resend;
+
+/// One webhook event PROVEN to come from Resend — a bounce, a complaint, a delivery.
+public class ResendEvent {
+  /// `email.bounced`, `email.complained`, `email.delivered`, …
+  public string Type = "";
+  /// The addresses the mail went to.
+  public List<string> To = [];
+  /// Resend's id for the mail — what `ResendMailer.Send` answered.
+  public string EmailId = "";
+  /// For a bounce: Resend's words for it ("Permanent" / "Transient", and the receiving server's message).
+  public string Detail = "";
+  /// A PERMANENT bounce: the address will never take mail. A transient one (a full mailbox) may.
+  public bool Permanent = false;
+  /// The verified raw JSON, for anything this class does not carry.
+  public string Payload = "";
+}
+
+class ResendWebhookEnvelope {
+  [ExternalName("type")] public string? Type;
+  [ExternalName("data")] public ResendWebhookData? Data;
+}
+
+class ResendWebhookData {
+  [ExternalName("email_id")] public string? EmailId;
+  [ExternalName("to")] public List<string>? To;
+  [ExternalName("bounce")] public ResendWebhookBounce? Bounce;
+}
+
+class ResendWebhookBounce {
+  [ExternalName("type")] public string? Type;
+  [ExternalName("subType")] public string? SubType;
+  [ExternalName("message")] public string? Message;
+}
+
+/// Verifies that a webhook request really came from Resend. Resend signs with Svix: three headers, `svix-id`,
+/// `svix-timestamp` and `svix-signature`, and an HMAC-SHA256 over `{id}.{timestamp}.{body}` under the endpoint's
+/// signing secret (`whsec_…`, shown when you add the endpoint in Resend's dashboard).
+///
+///   [AllowAnonymous] string MailEvents() {
+///     var e = new ResendWebhook { SigningSecret = Secret.ResendWebhookSecret }.Verify(Request.RawBody ?? "",
+///       Request.Header("svix-id") ?? "", Request.Header("svix-timestamp") ?? "", Request.Header("svix-signature") ?? "");
+///     if (e.Type == "email.complained") { … }
+///     return "ok";
+///   }
+///
+/// ⛔ THE ENDPOINT IS PUBLIC — Resend cannot sign in. The signature IS the authentication: without this check anyone
+///    may report any address as bouncing, and stop a list mailing it. Pass the RAW body, exactly as it arrived.
+public class ResendWebhook {
+  /// The endpoint's signing secret — `whsec_…`. Not the API key.
+  public string SigningSecret = "";
+  /// How far out of date a signature may be, in seconds — five minutes, as Svix's own libraries. Zero disables the
+  /// replay check, for replaying a captured event in a test only.
+  public long ToleranceSeconds = 300;
+
+  public ResendEvent Verify(string payload, string id, string timestamp, string signatureHeader) {
+    if (!SigningSecret.StartsWith("whsec_")) {
+      throw new ValidationException("This Resend webhook has no `SigningSecret` — set it to the endpoint's `whsec_…` secret from Resend's dashboard (not the API key).");
+    }
+    if (id == "" || timestamp == "" || signatureHeader == "") {
+      throw new ValidationException("This request carries no `svix-id`, `svix-timestamp` and `svix-signature` headers, so it cannot have come from Resend. Name all three in the endpoint's `Headers`.");
+    }
+    if (ToleranceSeconds > 0) {
+      var sent = long.Parse(timestamp);
+      var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+      var drift = now > sent ? now - sent : sent - now;
+      if (drift > ToleranceSeconds) {
+        throw new ValidationException($"This webhook is {drift}s out of date and the tolerance is {ToleranceSeconds}s, so it is refused as a possible replay.");
+      }
+    }
+    var key = Convert.FromBase64String(SigningSecret.Substring(6));
+    var expected = Convert.ToBase64String(Crypto.HmacSha256(key, Text.ToBytes(id + "." + timestamp + "." + payload)));
+    var matched = false;
+    // Several signatures, space-separated, while a secret is rolled over — any one of them may match.
+    foreach (var part in signatureHeader.Split(' ')) {
+      var comma = part.IndexOf(",");
+      if (comma > 0 && part.Substring(0, comma) == "v1" && FixedTimeEquals(expected, part.Substring(comma + 1))) { matched = true; }
+    }
+    if (!matched) {
+      throw new ValidationException("This webhook's signature does not match: it did not come from Resend, or the body was changed on the way — pass the raw request body through untouched.");
+    }
+    // Verified, but not an event in Resend's shape (Svix's own test sends are arbitrary JSON): its type is "".
+    if (!payload.Contains("\"type\"")) { return new ResendEvent { Payload = payload }; }
+    var envelope = JsonSerializer.Deserialize<ResendWebhookEnvelope>(payload);
+    var bounce = envelope.Data?.Bounce;
+    return new ResendEvent {
+      Type = envelope.Type ?? "",
+      To = envelope.Data?.To ?? [],
+      EmailId = envelope.Data?.EmailId ?? "",
+      Detail = bounce == null ? "" : $"{bounce.Type ?? ""} {bounce.SubType ?? ""}: {bounce.Message ?? ""}".Trim(),
+      Permanent = bounce != null && bounce.Type == "Permanent",
+      Payload = payload,
+    };
+  }
+
+  bool FixedTimeEquals(string a, string b) {
+    if (a.Length != b.Length) { return false; }
+    var differences = 0;
+    for (var i = 0; i < a.Length; i = i + 1) {
+      if (a[i] != b[i]) { differences = differences + 1; }
+    }
+    return differences == 0;
+  }
+}
