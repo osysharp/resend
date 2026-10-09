@@ -15,12 +15,21 @@
     {
       "name": "Osysharp.Resend",
       "kind": "package",
-      "version": "0.2.0",
-      "hash": "sha256:c310c059c71a204e89e3f023c471ee2ce7bf66351ba5a6f17b23ab40ecdfdec9",
+      "version": "0.2.1",
+      "hash": "sha256:3b441c7661a10519c968d0cb87cfde4db3986a0806d6a415755617d10207eed6",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/resend",
       "constraint": "0"
     }
-  ]
+  ],
+  "bridges": {
+    "searched": [
+      "workspace",
+      "platform"
+    ],
+    "skipped": [
+      "github: offline \u2014 the public catalog was not searched for bridges. Run \u0060osy lock\u0060 with a network to look."
+    ]
+  }
 }

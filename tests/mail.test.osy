@@ -184,11 +184,8 @@ void an_idempotency_key_rides_a_single_send() {
   // A handler that runs twice — a redelivered event, a retried workflow step — must not mail the customer twice.
   // The key is derived from what the mail is ABOUT, so the retry carries the same one.
   //
-  // ⚠ THIS TEST USED TO ASSERT NOTHING IT WAS NAMED FOR, and said so in its own comment: *"The header is not
-  //   visible in the body; what this holds is that passing a key does not disturb the request."* A stub lambda could
-  //   see the URL and the body and no headers, so the key — which travels as a header — was unobservable, and what
-  //   was left was a subject-line assertion wearing an idempotency test's name. Worse than no test: it read as
-  //   coverage. The third stub parameter (2026-09-20) is what makes the real assertion writable.
+  // ⚠ The key travels as a HEADER, so the stub takes the third parameter — the request's headers — and the test
+  //   asserts the key itself, not merely that the request still went out.
   var sentKeys = new List<string>();
   var sentAuth = new List<string>();
   Http.Post.Stub((url, body, headers) => {
