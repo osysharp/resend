@@ -12,8 +12,8 @@
 //    stdlib verb would have to pick one. What the platform owes instead is that expressing it takes a few lines of
 //    ordinary Osy# — which is what this kit is, and why the whole of it is 200 lines with no C# anywhere.
 package Osysharp.Resend {
-  version "0.2.1";
-  minPlatform "0.9.0";
+  version "0.3.0";
+  minPlatform "0.14.0";
   summary     "transactional email through Resend — one send or a batch, text and HTML, replies and attachments.";
 
   model "model/*.osy";
