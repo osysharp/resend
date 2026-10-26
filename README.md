@@ -112,3 +112,101 @@ never heard of. That is deliberate: **the platform has no `Email.Send`, and will
 somebody's account with somebody's provider, and a stdlib verb would have to pick one. What the platform owes
 instead is that expressing it takes a few lines — which is what this kit is, and why the whole of it is under 200
 lines with no C# anywhere.
+
+## Examples
+
+Taken from this package's own tests, which compile and run on every release.
+
+```osy
+using Osysharp.Http;
+using Osysharp.Resend;
+
+[Test]
+void a_plain_receipt_posts_the_message_and_answers_its_id() {
+  var posted = new List<string>();
+  var urls = new List<string>();
+  Http.Post.Stub((url, body) => {
+    urls.Add(url);
+    posted.Add(body);
+    return new HttpResponse { StatusCode = 200, Body = "{\"id\":\"11111111-2222-3333-4444-555555555555\"}" };
+  });
+
+  var id = SendReceipt("buyer@example.test", "A-1001");
+
+  Assert.Equal("11111111-2222-3333-4444-555555555555", id);
+  Assert.Equal("https://api.resend.com/emails", urls[0]);
+  Assert.Contains("\"to\":[\"buyer@example.test\"]", posted[0]);
+  Assert.Contains("\"subject\":\"Your receipt for A-1001\"", posted[0]);
+  // The mailer's own `From` fills in for a message that names none.
+  Assert.Contains("noreply@acme.test", posted[0]);
+}
+```
+
+From [`tests/mail.test.osy`](tests/mail.test.osy).
+
+```osy
+using Osysharp.Http;
+using Osysharp.Resend;
+
+[Test]
+void an_absent_field_is_ABSENT_rather_than_null() {
+  // ⛔ THE POINT OF THE IGNORE CONDITION. `"html": null` and no `html` key are different requests to a provider,
+  //    and the second is the one that means "I am not sending HTML".
+  var posted = new List<string>();
+  var urls = new List<string>();
+  Http.Post.Stub((url, body) => {
+    urls.Add(url);
+    posted.Add(body);
+    return new HttpResponse { StatusCode = 200, Body = "{\"id\":\"id-1\"}" };
+  });
+
+  SendReceipt("buyer@example.test", "A-1002");
+
+  Assert.Contains("\"text\":", posted[0]);
+  Assert.DoesNotContain("\"html\"", posted[0]);
+  Assert.DoesNotContain("null", posted[0]);
+}
+```
+
+From [`tests/mail.test.osy`](tests/mail.test.osy).
+
+```osy
+using Osysharp.Http;
+using Osysharp.Resend;
+
+[Test]
+void cc_and_reply_to_travel_as_the_arrays_the_provider_takes() {
+  var posted = new List<string>();
+  var urls = new List<string>();
+  Http.Post.Stub((url, body) => {
+    urls.Add(url);
+    posted.Add(body);
+    return new HttpResponse { StatusCode = 200, Body = "{\"id\":\"id-2\"}" };
+  });
+
+  SendHtmlNotice("owner@example.test");
+
+  // ⚠ `<` AND `>` TRAVEL ESCAPED — `"html":"\u003Cp\u003E…"`. That is the JSON serializer's default encoder, it
+  //    is valid JSON, and Resend decodes it to exactly the markup written above; asserting the literal `<p>` here
+  //    would be asserting an encoder setting rather than the message. What the mail actually carries is the TEXT.
+  Assert.Contains("Your statement is ready.", posted[0]);
+  Assert.Contains("\"html\":", posted[0]);
+  Assert.Contains("\"cc\":[\"records@acme.test\"]", posted[0]);
+  Assert.Contains("\"reply_to\":[\"support@acme.test\"]", posted[0]);
+  // …and the ones that were not set are not there at all.
+  Assert.DoesNotContain("\"bcc\"", posted[0]);
+  Assert.DoesNotContain("\"attachments\"", posted[0]);
+}
+```
+
+From [`tests/mail.test.osy`](tests/mail.test.osy).
+
+## Learn more
+
+- [Osysharp.Resend in the package catalogue](https://osysharp.com/packages/#osysharp-resend)
+- [The Osy# reference](https://osysharp.com/reference/) — the language, the runtime and every kit
+- [`llms-full.txt`](https://osysharp.com/llms-full.txt) — the whole reference and specification as one Markdown file, for a coding agent
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).
